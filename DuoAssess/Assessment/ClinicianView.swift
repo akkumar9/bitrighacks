@@ -14,29 +14,14 @@ struct ClinicianView: View {
     var accessoryAvailable: Bool
     /// Decided by RootView from the whole window.
     var isWide: Bool
+    /// The app-level mode switch, shown beside the status badge.
+    var modePicker: AnyView = AnyView(EmptyView())
 
     var body: some View {
-        GeometryReader { proxy in
-            // The division region exists (inactive, zero width) whenever the display can fold;
-            // it is active only while the phone is partly folded. No region at all = no fold.
-            let folds = proxy.reservedRegions(kind: .division, options: .includeInactive)
-            let foldActive = folds.contains { $0.isActive }
-            if !folds.isEmpty && isWide {
-                // Note: `.split.axes(.vertical)` hid the secondary pane on this display even with a
-                // bounded primary; the horizontal split matches the fold and shows both.
-                ArrangementView {
-                    AboveFold(session: session, accessoryAvailable: accessoryAvailable, foldActive: foldActive)
-                } secondary: {
-                    ControlDeck(session: session, wide: false)
-                }
-                .arrangementViewStyle(.split.axes(.horizontal))
-            } else {
-                VStack(spacing: 0) {
-                    AboveFold(session: session, accessoryAvailable: accessoryAvailable, foldActive: false)
-                    ScrollView { ControlDeck(session: session, wide: false) }
-                        .frame(maxHeight: isWide ? .infinity : 280)
-                }
-            }
+        FoldSplit(isWide: isWide) { foldActive in
+            AboveFold(session: session, accessoryAvailable: accessoryAvailable, foldActive: foldActive, modePicker: modePicker)
+        } secondary: {
+            ControlDeck(session: session, wide: false)
         }
         .background(Color(white: 0.08))
     }
@@ -47,12 +32,17 @@ struct AboveFold: View {
     var session: SessionModel
     var accessoryAvailable: Bool
     var foldActive: Bool
+    var modePicker: AnyView = AnyView(EmptyView())
 
     var body: some View {
         HStack(spacing: 0) {
             StageView(session: session, showDetails: true)
                 .overlay(alignment: .topLeading) {
-                    StatusBadge(session: session, accessoryAvailable: accessoryAvailable, foldActive: foldActive).padding(8)
+                    VStack(alignment: .leading, spacing: 6) {
+                        modePicker
+                        StatusBadge(session: session, accessoryAvailable: accessoryAvailable, foldActive: foldActive)
+                    }
+                    .padding(8)
                 }
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline) {
