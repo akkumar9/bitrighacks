@@ -48,7 +48,8 @@ struct CueLabel: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 18).padding(.vertical, 10)
             .background(tint.opacity(0.6), in: Capsule())
-            .animation(.snappy, value: cue.text)
+            .contentTransition(.opacity)
+            .animation(.snappy, value: cue.tone)
     }
 }
 

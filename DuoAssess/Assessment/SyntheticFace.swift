@@ -22,7 +22,7 @@ struct SyntheticFace: Equatable {
     /// Face placement in the frame.
     var center = CGPoint(x: 0.5, y: 0.55)
     /// Interocular distance in normalized image units; everything else scales with it.
-    var interocular: Double = 0.12
+    var interocular: Double = 0.16
 
     /// 0 at rest, 1 at the fullest smile. Each period is half rest, then one smooth smile bump,
     /// so a clip opens with enough resting frames for the baseline to calibrate.

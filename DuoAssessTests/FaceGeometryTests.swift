@@ -15,7 +15,7 @@ struct FaceGeometryTests {
     @Test func interocularAndCorners() {
         let lm = rest()
         let iod = FaceGeometry.interocularDistance(lm)!
-        #expect(abs(iod - 0.12) < 1e-9)
+        #expect(abs(iod - 0.16) < 1e-9)
         let corners = FaceGeometry.mouthCorners(lm)!
         #expect(corners.left.x > corners.right.x)      // subject's left is at +x
     }
