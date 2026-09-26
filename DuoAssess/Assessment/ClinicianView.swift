@@ -1,45 +1,91 @@
 import SwiftUI
 
-/// Inner display: stage with overlay, metrics, transport, thresholds and log. Renders the
-/// session's `Readout`; it does not know which profile is running.
+/// Inner display, split across the fold:
+/// - one half: the picture with the profile's overlay, live metrics, phase and count
+/// - other half: the control deck (profile picker, transport, thresholds, recalibrate, log)
+///
+/// On the simulator's landscape inner display the fold is a vertical 40 pt band down the middle
+/// (measured 2026-09-26: frame x 455…495 of 951, full height), so the split axis is horizontal:
+/// picture left, deck right. The split is an `ArrangementView` when the display has a fold (Duo
+/// inner display, any pose); elsewhere (outer display in Closed pose, non-Duo devices) the same
+/// two surfaces stack in a VStack. Everything renders from the session's `Readout`.
 struct ClinicianView: View {
     @Bindable var session: SessionModel
     var accessoryAvailable: Bool
-    /// Decided by RootView from the whole window, not this pane's own frame (which is
-    /// landscape-ish even in the stacked portrait layout).
+    /// Decided by RootView from the whole window.
     var isWide: Bool
 
     var body: some View {
-        // Side by side when wide (inner display), stacked with a scrolling deck when tall
-        // (closed pose puts the app on the portrait outer display).
-        let layout = isWide ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
-        layout {
-            VStack(spacing: 0) {
-                StageView(session: session, showDetails: true)
-                    .overlay(alignment: .topLeading) { StatusBadge(session: session, accessoryAvailable: accessoryAvailable).padding(10) }
-                    .overlay(alignment: .topTrailing) { CountBadge(count: session.readout.completedCount).padding(10) }
-                Transport(session: session)
-            }
-            if isWide {
-                ControlDeck(session: session).frame(width: 260)
+        GeometryReader { proxy in
+            // The division region exists (inactive, zero width) whenever the display can fold;
+            // it is active only while the phone is partly folded. No region at all = no fold.
+            let folds = proxy.reservedRegions(kind: .division, options: .includeInactive)
+            let foldActive = folds.contains { $0.isActive }
+            if !folds.isEmpty && isWide {
+                // Note: `.split.axes(.vertical)` hid the secondary pane on this display even with a
+                // bounded primary; the horizontal split matches the fold and shows both.
+                ArrangementView {
+                    AboveFold(session: session, accessoryAvailable: accessoryAvailable, foldActive: foldActive)
+                } secondary: {
+                    ControlDeck(session: session, wide: false)
+                }
+                .arrangementViewStyle(.split.axes(.horizontal))
             } else {
-                ScrollView { ControlDeck(session: session) }.frame(maxHeight: 260)
+                VStack(spacing: 0) {
+                    AboveFold(session: session, accessoryAvailable: accessoryAvailable, foldActive: false)
+                    ScrollView { ControlDeck(session: session, wide: false) }
+                        .frame(maxHeight: isWide ? .infinity : 280)
+                }
             }
         }
         .background(Color(white: 0.08))
     }
 }
 
+/// Picture + overlay on the left, numbers on the right.
+struct AboveFold: View {
+    var session: SessionModel
+    var accessoryAvailable: Bool
+    var foldActive: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            StageView(session: session, showDetails: true)
+                .overlay(alignment: .topLeading) {
+                    StatusBadge(session: session, accessoryAvailable: accessoryAvailable, foldActive: foldActive).padding(8)
+                }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(session.profile.displayName.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    CountBadge(count: session.readout.completedCount)
+                }
+                HStack {
+                    Text("Phase").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Text(session.readout.phase.capitalized).font(.body.weight(.semibold))
+                }
+                MetricsList(session: session)
+                Spacer(minLength: 0)
+            }
+            .padding(10)
+            .frame(width: 190)
+            .background(.regularMaterial)
+        }
+    }
+}
+
 struct StatusBadge: View {
     var session: SessionModel
     var accessoryAvailable: Bool
+    var foldActive: Bool = false
 
     var body: some View {
         HStack(spacing: 8) {
             Label(accessoryAvailable ? "outer live" : "outer off",
                   systemImage: accessoryAvailable ? "rectangle.on.rectangle.fill" : "rectangle.on.rectangle.slash")
-            Text(session.sourceLabel)
-            if let d = session.hingeDegrees { Text(String(format: "hinge %.0f°", d)).monospacedDigit() } else { Text("no hinge") }
+            Text(session.source.label)
+            if let d = session.hingeDegrees { Text(String(format: "hinge %.0f°%@", d, foldActive ? " · folded" : "")).monospacedDigit() } else { Text("no hinge") }
             if let e = session.errorMessage { Text(e).foregroundStyle(.red) }
         }
         .font(.caption).lineLimit(1).fixedSize()
@@ -51,15 +97,31 @@ struct StatusBadge: View {
 struct CountBadge: View {
     var count: Int
     var body: some View {
-        VStack(alignment: .trailing, spacing: 0) {
-            Text("DONE").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text("\(count)")
-                .font(.title.weight(.bold).monospacedDigit())
+                .font(.title2.weight(.bold).monospacedDigit())
                 .contentTransition(.numericText(value: Double(count)))
+            Text("done").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 14).padding(.vertical, 6)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
         .animation(.snappy, value: count)
+    }
+}
+
+/// Live metrics from the readout, monospaced digits.
+struct MetricsList: View {
+    var session: SessionModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(session.readout.metrics) { m in
+                HStack {
+                    Text(m.label).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer()
+                    Text(m.value).font(.callout.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(m.flagged ? .red : .primary)
+                }
+            }
+        }
     }
 }
 
@@ -91,57 +153,43 @@ struct Transport: View {
             .font(.caption)
             .fixedSize()
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(.regularMaterial)
     }
 }
 
-/// Live metrics from the readout.
-struct MetricsList: View {
-    var session: SessionModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("LIVE").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-            ForEach(session.readout.metrics) { m in
-                HStack {
-                    Text(m.label).font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Text(m.value).font(.body.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(m.flagged ? .red : .primary)
-                }
-            }
-        }
-    }
-}
-
-/// Profile picker, thresholds, recalibrate, log.
+/// Profile picker, transport, thresholds, recalibrate, log. Three columns when wide.
 struct ControlDeck: View {
     @Bindable var session: SessionModel
+    var wide: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Picker("Profile", selection: Binding(get: { session.profile.id }, set: { session.selectProfile(id: $0) })) {
-                ForEach(session.profiles, id: \.id) { p in Text(p.displayName).tag(p.id) }
+        let layout = wide ? AnyLayout(HStackLayout(alignment: .top, spacing: 16)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+        layout {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("Profile", selection: Binding(get: { session.profile.id }, set: { session.selectProfile(id: $0) })) {
+                    ForEach(session.profiles, id: \.id) { p in Text(p.displayName).tag(p.id) }
+                }
+                .pickerStyle(.segmented)
+                Transport(session: session)
+                Button { session.recalibrate() } label: {
+                    Label("Recalibrate", systemImage: "arrow.counterclockwise")
+                }
+                .buttonStyle(.bordered).controlSize(.small)
+                Text("\(session.framesAnalysed) frames analysed")
+                    .font(.caption2).foregroundStyle(.tertiary)
             }
-            .pickerStyle(.segmented)
+            .frame(maxWidth: wide ? 380 : .infinity)
 
-            MetricsList(session: session)
-            Divider()
             ThresholdSliders(session: session)
-            Divider()
-            HStack {
+                .frame(maxWidth: wide ? 300 : .infinity)
+
+            VStack(alignment: .leading, spacing: 6) {
                 Text("LOG").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                Spacer()
-                Button("Recalibrate") { session.recalibrate() }
-                    .font(.caption).buttonStyle(.bordered).controlSize(.small)
+                LogList(session: session)
             }
-            LogList(session: session)
-            Spacer(minLength: 0)
-            Text("\(session.framesAnalysed) frames analysed")
-                .font(.caption2).foregroundStyle(.tertiary)
+            .frame(maxWidth: .infinity)
         }
         .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(.regularMaterial)
     }
 }
@@ -156,7 +204,7 @@ struct ThresholdSliders: View {
             let _ = session.revision
             ForEach(session.profile.controls) { c in
                 HStack(spacing: 8) {
-                    Text(c.label).font(.caption).frame(width: 96, alignment: .leading).lineLimit(1)
+                    Text(c.label).font(.caption).frame(width: 90, alignment: .leading).lineLimit(1)
                     Slider(value: Binding(get: { c.get() }, set: { c.set($0); session.refresh() }),
                            in: c.range, step: c.step)
                     Text(c.format(c.get())).font(.caption.monospacedDigit()).frame(width: 44, alignment: .trailing)

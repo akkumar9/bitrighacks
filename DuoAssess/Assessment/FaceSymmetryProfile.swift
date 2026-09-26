@@ -80,7 +80,6 @@ final class FaceSymmetryProfile: Profile {
                        flagged: !calibrated),
                 Metric(id: "score", label: "Symmetry", value: m.map { String(format: "%.0f", $0.symmetryScore) } ?? "—",
                        flagged: (m?.symmetryScore ?? 100) < 70),
-                Metric(id: "phase", label: "Phase", value: phase.rawValue.capitalized),
                 Metric(id: "mouthL", label: "Mouth L", value: d(m?.mouthCornerDeltaLeft)),
                 Metric(id: "mouthR", label: "Mouth R", value: d(m?.mouthCornerDeltaRight)),
                 Metric(id: "browL", label: "Brow L", value: d(m?.eyebrowDeltaLeft)),

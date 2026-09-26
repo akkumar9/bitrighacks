@@ -66,7 +66,6 @@ final class SquatProfile: Profile {
             let count = analysis.repCount
 
             var metrics: [Metric] = [
-                Metric(id: "phase", label: "Phase", value: phase.rawValue.capitalized),
                 Metric(id: "kneeL", label: "Knee L", value: m?.leftKneeAngle.map { String(format: "%.0f°", $0) } ?? "—"),
                 Metric(id: "kneeR", label: "Knee R", value: m?.rightKneeAngle.map { String(format: "%.0f°", $0) } ?? "—"),
                 Metric(id: "depth", label: "Depth", value: m.map { String(format: "%.0f%%", $0.depth * 100) } ?? "—"),
