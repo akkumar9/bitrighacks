@@ -70,8 +70,8 @@ final class SessionModel {
     // MARK: - Profiles
 
     /// Video if `design/<videoName>.mp4` is bundled, synthetic otherwise.
-    static func source(for profile: any Profile) -> Source {
-        if let url = Bundle.main.url(forResource: profile.videoName, withExtension: "mp4", subdirectory: "design") {
+    static func source(for profile: any Profile, in bundle: Bundle = .main) -> Source {
+        if let url = bundle.url(forResource: profile.videoName, withExtension: "mp4", subdirectory: "design") {
             return .video(url)
         }
         return .synthetic
@@ -195,9 +195,18 @@ extension SessionModel: AssessmentEngineDelegate {
         currentTime = time
     }
 
+    /// A bundled video that fails to load must not strand the demo: drop to the synthetic engine
+    /// and keep the error visible in the status badge.
     func engine(_ engine: AssessmentEngine, didFail message: String) {
         errorMessage = message
-        isPlaying = false
+        guard case .video = source else { isPlaying = false; return }
+        engine.stop()
+        source = .synthetic
+        let e = SyntheticEngine(sink: sink, duration: profile.syntheticDuration, videoSize: profile.syntheticVideoSize)
+        e.delegate = self
+        self.engine = e
+        e.start()
+        isPlaying = true
     }
 
     func engineDidReachEnd(_ engine: AssessmentEngine) {
