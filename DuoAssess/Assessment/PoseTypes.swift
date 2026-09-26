@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// Joints the app tracks. Vision's VNHumanBodyPoseObservation names are mapped onto these in
 /// VideoPoseEngine; the synthetic generator emits them directly.
@@ -35,7 +36,10 @@ struct PoseFrame: Equatable {
     }
 }
 
-enum Skeleton {
+/// A set of joint positions (any coordinate space) plus the bone list used to draw them.
+struct Skeleton: Equatable {
+    var joints: [Joint: CGPoint] = [:]
+
     /// Bones to draw, as joint pairs.
     static let bones: [(Joint, Joint)] = [
         (.nose, .neck),
@@ -47,6 +51,14 @@ enum Skeleton {
         (.leftHip, .leftKnee), (.leftKnee, .leftAnkle),
         (.rightHip, .rightKnee), (.rightKnee, .rightAnkle),
     ]
+
+    /// Bone segments for which both ends are present.
+    var segments: [(CGPoint, CGPoint)] {
+        Skeleton.bones.compactMap { a, b in
+            guard let pa = joints[a], let pb = joints[b] else { return nil }
+            return (pa, pb)
+        }
+    }
 }
 
 /// Frames sorted by time. Scrubbing produces frames out of order, so analysis always runs over
