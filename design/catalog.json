@@ -1,0 +1,14 @@
+[
+  { "id": "sofa-navy",     "name": "Halden Sofa",        "category": "sofa",  "price": 1499, "file": "sofa-navy.png",     "widthCm": 210 },
+  { "id": "sofa-linen",    "name": "Sund Loveseat",      "category": "sofa",  "price": 1099, "file": "sofa-linen.png",    "widthCm": 160 },
+  { "id": "chair-oak",     "name": "Fjell Armchair",     "category": "chair", "price": 649,  "file": "chair-oak.png",     "widthCm": 78 },
+  { "id": "chair-sling",   "name": "Vik Lounge Chair",   "category": "chair", "price": 529,  "file": "chair-sling.png",   "widthCm": 72 },
+  { "id": "table-coffee",  "name": "Bryn Coffee Table",  "category": "table", "price": 399,  "file": "table-coffee.png",  "widthCm": 120 },
+  { "id": "table-side",    "name": "Lom Side Table",     "category": "table", "price": 179,  "file": "table-side.png",    "widthCm": 45 },
+  { "id": "rug-wool",      "name": "Tind Wool Rug",      "category": "rug",   "price": 349,  "file": "rug-wool.png",      "widthCm": 240 },
+  { "id": "rug-jute",      "name": "Åsen Jute Rug",      "category": "rug",   "price": 229,  "file": "rug-jute.png",      "widthCm": 200 },
+  { "id": "lamp-floor",    "name": "Nord Floor Lamp",    "category": "lamp",  "price": 249,  "file": "lamp-floor.png",    "widthCm": 40 },
+  { "id": "lamp-arc",      "name": "Bue Arc Lamp",       "category": "lamp",  "price": 329,  "file": "lamp-arc.png",      "widthCm": 60 },
+  { "id": "plant-fiddle",  "name": "Fiddle-Leaf Fig",    "category": "plant", "price": 129,  "file": "plant-fiddle.png",  "widthCm": 70 },
+  { "id": "plant-monstera","name": "Monstera",           "category": "plant", "price": 89,   "file": "plant-monstera.png","widthCm": 80 }
+]
