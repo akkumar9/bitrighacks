@@ -1,8 +1,8 @@
 import SwiftUI
 import AVFoundation
 
-/// Letterboxes the video's aspect ratio into a canvas and maps Vision-normalized joints to points.
-/// Both displays use this, so the skeleton lands on the same pixels of the picture on each.
+/// Letterboxes the video's aspect ratio into a canvas and maps normalized (y-up) points to it.
+/// Both displays use this, so overlays land on the same pixels of the picture on each.
 struct StageGeometry: Equatable {
     let rect: CGRect
 
@@ -15,16 +15,15 @@ struct StageGeometry: Equatable {
     }
 
     /// Vision coordinates are y-up; SwiftUI's are y-down.
-    func point(_ j: JointPoint) -> CGPoint {
-        CGPoint(x: rect.minX + CGFloat(j.x) * rect.width,
-                y: rect.minY + CGFloat(1 - j.y) * rect.height)
+    func point(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: rect.minX + p.x * rect.width, y: rect.minY + (1 - p.y) * rect.height)
     }
 }
 
-/// Video (or a studio backdrop for synthetic data) with the skeleton drawn over it.
+/// Video (or a studio backdrop for synthetic data) with the profile's overlay drawn on top.
 struct StageView: View {
     var session: SessionModel
-    /// Clinician: angle labels at the knees and phase colouring. Patient: plain skeleton.
+    /// Clinician: extra detail (e.g. the face midline). Patient: the plain overlay.
     var showDetails: Bool
 
     var body: some View {
@@ -37,61 +36,58 @@ struct StageView: View {
                         .frame(width: g.rect.width, height: g.rect.height)
                         .position(x: g.rect.midX, y: g.rect.midY)
                 } else {
-                    StudioBackdrop()
+                    StudioBackdrop(label: "\(session.profile.displayName.lowercased()) · synthetic · no \(session.profile.videoName).mp4")
                         .frame(width: g.rect.width, height: g.rect.height)
                         .position(x: g.rect.midX, y: g.rect.midY)
                 }
-                SkeletonView(frame: session.current?.smoothed, metrics: session.metrics,
-                             geometry: g, showDetails: showDetails,
-                             minConfidence: session.thresholds.minConfidence)
+                OverlayView(overlay: session.readout.overlay, geometry: g, showDetails: showDetails)
             }
         }
     }
 }
 
-/// Draws bones and joints. Knees turn red while valgus is flagged.
-struct SkeletonView: View {
-    var frame: PoseFrame?
-    var metrics: SquatMetrics?
+/// Draws whatever the profile handed back. Knows nothing about the profile.
+struct OverlayView: View {
+    var overlay: Overlay
     var geometry: StageGeometry
     var showDetails: Bool
-    var minConfidence: Double
 
     var body: some View {
         Canvas { ctx, _ in
-            guard let frame else { return }
-            let valgus = metrics?.isValgus ?? false
-            let boneWidth = max(3, geometry.rect.width * 0.012)
+            let stroke = max(3, geometry.rect.width * 0.012)
+            switch overlay {
+            case .none:
+                break
 
-            for (a, b) in Skeleton.bones {
-                guard let pa = frame.joints[a], let pb = frame.joints[b],
-                      pa.confidence >= minConfidence, pb.confidence >= minConfidence else { continue }
-                var path = Path()
-                path.move(to: geometry.point(pa))
-                path.addLine(to: geometry.point(pb))
-                let isLeg = [a, b].contains { [.leftKnee, .rightKnee].contains($0) }
-                let color: Color = (isLeg && valgus) ? .red : Color(red: 0.35, green: 0.9, blue: 1.0)
-                ctx.stroke(path, with: .color(color.opacity(0.9)), style: StrokeStyle(lineWidth: boneWidth, lineCap: .round))
-            }
-
-            for (joint, p) in frame.joints where p.confidence >= minConfidence {
-                let c = geometry.point(p)
-                let r = boneWidth * (joint == .leftKnee || joint == .rightKnee ? 1.6 : 1.1)
-                let isKnee = joint == .leftKnee || joint == .rightKnee
-                let fill: Color = (isKnee && valgus) ? .red : .white
-                ctx.fill(Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r)), with: .color(fill))
-            }
-
-            if showDetails, let m = metrics {
-                func label(_ text: String, at joint: Joint, dx: CGFloat) {
-                    guard let p = frame.joints[joint], p.confidence >= minConfidence else { return }
-                    let c = geometry.point(p)
-                    let t = Text(text).font(.system(size: max(11, geometry.rect.width * 0.035), weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                    ctx.draw(t, at: CGPoint(x: c.x + dx, y: c.y), anchor: dx > 0 ? .leading : .trailing)
+            case .skeleton(let bones, let joints):
+                let color = Color(red: 0.35, green: 0.9, blue: 1.0)
+                for (a, b) in bones {
+                    var path = Path()
+                    path.move(to: geometry.point(a))
+                    path.addLine(to: geometry.point(b))
+                    ctx.stroke(path, with: .color(color.opacity(0.9)), style: StrokeStyle(lineWidth: stroke, lineCap: .round))
                 }
-                if let l = m.leftKneeAngle { label(String(format: "%.0f°", l), at: .leftKnee, dx: boneWidth * 3) }
-                if let r = m.rightKneeAngle { label(String(format: "%.0f°", r), at: .rightKnee, dx: -boneWidth * 3) }
+                for j in joints {
+                    let c = geometry.point(j), r = stroke * 1.1
+                    ctx.fill(Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r)), with: .color(.white))
+                }
+
+            case .face(let points, let midline, let ghost):
+                let r = max(1.5, geometry.rect.width * 0.004)
+                for p in ghost {
+                    let c = geometry.point(p)
+                    ctx.fill(Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r)), with: .color(.white.opacity(0.25)))
+                }
+                for p in points {
+                    let c = geometry.point(p)
+                    ctx.fill(Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r)), with: .color(Color(red: 0.35, green: 0.9, blue: 1.0)))
+                }
+                if showDetails, let (a, b) = midline {
+                    var path = Path()
+                    path.move(to: geometry.point(a))
+                    path.addLine(to: geometry.point(b))
+                    ctx.stroke(path, with: .color(.yellow.opacity(0.8)), style: StrokeStyle(lineWidth: max(1, stroke * 0.4), dash: [6, 4]))
+                }
             }
         }
         .shadow(color: .black.opacity(0.6), radius: 2)
@@ -119,8 +115,10 @@ struct PlayerLayerView: UIViewRepresentable {
     }
 }
 
-/// Stand-in for the video while running on synthetic data: a wall, a floor line, a hint.
+/// Stand-in for the video while running on synthetic data.
 struct StudioBackdrop: View {
+    var label: String
+
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .top) {
@@ -128,7 +126,7 @@ struct StudioBackdrop: View {
                 Rectangle().fill(Color(white: 0.09))
                     .frame(height: geo.size.height * 0.12)
                     .frame(maxHeight: .infinity, alignment: .bottom)
-                Text("synthetic squat · no squat.mp4")
+                Text(label)
                     .font(.caption2).foregroundStyle(.white.opacity(0.4)).padding(8)
             }
         }

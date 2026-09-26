@@ -1,29 +1,44 @@
 import SwiftUI
 
-/// Inner display: video + skeleton, live metrics, rep list, transport and hinge-scrub control.
+/// Inner display: stage with overlay, metrics, transport, thresholds and log. Renders the
+/// session's `Readout`; it does not know which profile is running.
 struct ClinicianView: View {
     @Bindable var session: SessionModel
     var accessoryAvailable: Bool
+    /// Decided by RootView from the whole window, not this pane's own frame (which is
+    /// landscape-ish even in the stacked portrait layout).
+    var isWide: Bool
 
     var body: some View {
-        HStack(spacing: 0) {
+        // Side by side when wide (inner display), stacked with a scrolling deck when tall
+        // (closed pose puts the app on the portrait outer display).
+        let layout = isWide ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+        layout {
             VStack(spacing: 0) {
                 StageView(session: session, showDetails: true)
-                    .overlay(alignment: .topLeading) { statusBadge.padding(10) }
-                    .overlay(alignment: .topTrailing) { repBadge.padding(10) }
+                    .overlay(alignment: .topLeading) { StatusBadge(session: session, accessoryAvailable: accessoryAvailable).padding(10) }
+                    .overlay(alignment: .topTrailing) { CountBadge(count: session.readout.completedCount).padding(10) }
                 Transport(session: session)
             }
-            MetricsPanel(session: session)
-                .frame(width: 250)
+            if isWide {
+                ControlDeck(session: session).frame(width: 260)
+            } else {
+                ScrollView { ControlDeck(session: session) }.frame(maxHeight: 260)
+            }
         }
         .background(Color(white: 0.08))
     }
+}
 
-    private var statusBadge: some View {
+struct StatusBadge: View {
+    var session: SessionModel
+    var accessoryAvailable: Bool
+
+    var body: some View {
         HStack(spacing: 8) {
             Label(accessoryAvailable ? "outer live" : "outer off",
                   systemImage: accessoryAvailable ? "rectangle.on.rectangle.fill" : "rectangle.on.rectangle.slash")
-            Text(session.source.label)
+            Text(session.sourceLabel)
             if let d = session.hingeDegrees { Text(String(format: "hinge %.0f°", d)).monospacedDigit() } else { Text("no hinge") }
             if let e = session.errorMessage { Text(e).foregroundStyle(.red) }
         }
@@ -31,17 +46,20 @@ struct ClinicianView: View {
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(.regularMaterial, in: Capsule())
     }
+}
 
-    private var repBadge: some View {
+struct CountBadge: View {
+    var count: Int
+    var body: some View {
         VStack(alignment: .trailing, spacing: 0) {
-            Text("REPS").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-            Text("\(session.repCount)")
+            Text("DONE").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            Text("\(count)")
                 .font(.title.weight(.bold).monospacedDigit())
-                .contentTransition(.numericText(value: Double(session.repCount)))
+                .contentTransition(.numericText(value: Double(count)))
         }
         .padding(.horizontal, 14).padding(.vertical, 6)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .animation(.snappy, value: session.repCount)
+        .animation(.snappy, value: count)
     }
 }
 
@@ -51,16 +69,13 @@ struct Transport: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Button {
-                session.togglePlayback()
-            } label: {
+            Button { session.togglePlayback() } label: {
                 Image(systemName: session.isPlaying ? "pause.fill" : "play.fill").frame(width: 20)
             }
             .buttonStyle(.borderedProminent)
             .accessibilityLabel(session.isPlaying ? "Pause" : "Play")
 
-            Slider(value: Binding(get: { session.currentTime },
-                                  set: { session.seek(to: $0) }),
+            Slider(value: Binding(get: { session.currentTime }, set: { session.seek(to: $0) }),
                    in: 0...max(session.duration, 0.01)) { editing in
                 if editing, session.isPlaying { session.pause() }
             }
@@ -81,59 +96,99 @@ struct Transport: View {
     }
 }
 
-/// Live numbers and the rep table.
-struct MetricsPanel: View {
+/// Live metrics from the readout.
+struct MetricsList: View {
     var session: SessionModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            let m = session.metrics
+        VStack(alignment: .leading, spacing: 8) {
             Text("LIVE").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-            metricRow("Phase", session.phase.rawValue.capitalized)
-            metricRow("Knee L", m?.leftKneeAngle.map { String(format: "%.0f°", $0) } ?? "—")
-            metricRow("Knee R", m?.rightKneeAngle.map { String(format: "%.0f°", $0) } ?? "—")
-            metricRow("Depth", m.map { String(format: "%.0f%%", $0.depth * 100) } ?? "—")
-            metricRow("Knee/ankle sep.", m?.kneeSeparationRatio.map { String(format: "%.2f", $0) } ?? "—",
-                      highlight: m?.isValgus == true)
-            metricRow("Valgus", m?.isValgus == true ? "YES" : "no", highlight: m?.isValgus == true)
-
-            Divider()
-            Text("REPS").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-            if session.analysis.reps.isEmpty {
-                Text("none yet").font(.caption).foregroundStyle(.tertiary)
-            }
-            ScrollView {
-                VStack(spacing: 6) {
-                    ForEach(session.analysis.reps) { rep in
-                        HStack {
-                            Text("#\(rep.id)").font(.caption.weight(.bold)).frame(width: 28, alignment: .leading)
-                            Text(String(format: "min %.0f°", rep.minKneeAngle)).font(.caption.monospacedDigit())
-                            Spacer()
-                            Text(String(format: "%.1fs", rep.duration)).font(.caption2).foregroundStyle(.secondary)
-                            Image(systemName: rep.hadValgus ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                                .foregroundStyle(rep.hadValgus ? .red : .green)
-                        }
-                        .padding(.horizontal, 8).padding(.vertical, 5)
-                        .background(session.current?.repNumber == rep.id ? Color.accentColor.opacity(0.25) : Color.white.opacity(0.05),
-                                    in: RoundedRectangle(cornerRadius: 6))
-                        .onTapGesture { session.pause(); session.seek(to: rep.bottomTime) }
-                    }
+            ForEach(session.readout.metrics) { m in
+                HStack {
+                    Text(m.label).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Text(m.value).font(.body.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(m.flagged ? .red : .primary)
                 }
             }
+        }
+    }
+}
+
+/// Profile picker, thresholds, recalibrate, log.
+struct ControlDeck: View {
+    @Bindable var session: SessionModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("Profile", selection: Binding(get: { session.profile.id }, set: { session.selectProfile(id: $0) })) {
+                ForEach(session.profiles, id: \.id) { p in Text(p.displayName).tag(p.id) }
+            }
+            .pickerStyle(.segmented)
+
+            MetricsList(session: session)
+            Divider()
+            ThresholdSliders(session: session)
+            Divider()
+            HStack {
+                Text("LOG").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                Button("Recalibrate") { session.recalibrate() }
+                    .font(.caption).buttonStyle(.bordered).controlSize(.small)
+            }
+            LogList(session: session)
             Spacer(minLength: 0)
-            Text("\(session.timeline.count) frames analysed")
+            Text("\(session.framesAnalysed) frames analysed")
                 .font(.caption2).foregroundStyle(.tertiary)
         }
         .padding(12)
         .background(.regularMaterial)
     }
+}
 
-    private func metricRow(_ name: String, _ value: String, highlight: Bool = false) -> some View {
-        HStack {
-            Text(name).font(.caption).foregroundStyle(.secondary)
-            Spacer()
-            Text(value).font(.body.monospacedDigit().weight(.semibold))
-                .foregroundStyle(highlight ? .red : .primary)
+struct ThresholdSliders: View {
+    var session: SessionModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("THRESHOLDS").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            // `revision` is read so the rows re-render when the model refreshes.
+            let _ = session.revision
+            ForEach(session.profile.controls) { c in
+                HStack(spacing: 8) {
+                    Text(c.label).font(.caption).frame(width: 96, alignment: .leading).lineLimit(1)
+                    Slider(value: Binding(get: { c.get() }, set: { c.set($0); session.refresh() }),
+                           in: c.range, step: c.step)
+                    Text(c.format(c.get())).font(.caption.monospacedDigit()).frame(width: 44, alignment: .trailing)
+                }
+            }
+        }
+    }
+}
+
+struct LogList: View {
+    var session: SessionModel
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 6) {
+                if session.log.isEmpty {
+                    Text("nothing completed yet").font(.caption).foregroundStyle(.tertiary)
+                }
+                ForEach(session.log) { e in
+                    HStack {
+                        Text(e.title).font(.caption.weight(.bold))
+                        Text(e.detail).font(.caption.monospacedDigit()).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer()
+                        Image(systemName: e.flagged ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                            .foregroundStyle(e.flagged ? .red : .green)
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 5)
+                    .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
+                    .contentShape(Rectangle())
+                    .onTapGesture { session.pause(); session.seek(to: e.time) }
+                }
+            }
         }
     }
 }

@@ -9,7 +9,7 @@ struct DuoAssessApp: App {
     }
 }
 
-/// Owns the shared session and both displays (PT pivot).
+/// Owns the shared session and both displays.
 /// - Inner display: ClinicianView. When the outer accessory is unavailable (closed/book pose,
 ///   non-Duo device) a patient pane is shown beside/below it instead.
 /// - Outer display: PatientView via the scene accessory. Presents on Open pose only.
@@ -24,7 +24,7 @@ struct RootView: View {
     var body: some View {
         let layout = isWide ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
         layout {
-            ClinicianView(session: session, accessoryAvailable: accessoryAvailable)
+            ClinicianView(session: session, accessoryAvailable: accessoryAvailable, isWide: isWide)
             if !accessoryAvailable {
                 FallbackPatientPane(session: session)
                     .frame(maxWidth: isWide ? 340 : .infinity, maxHeight: isWide ? .infinity : 300)

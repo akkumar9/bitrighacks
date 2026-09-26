@@ -1,8 +1,9 @@
 import SwiftUI
 import AVFoundation
+import ImageIO
 
 /// The one shared session. Both displays read it; the clinician's controls, the hinge and the
-/// pose engine write it.
+/// engine write it. Holds the current `Profile` and the readout it last produced.
 @MainActor
 @Observable
 final class SessionModel {
@@ -12,30 +13,32 @@ final class SessionModel {
 
         var label: String {
             switch self {
-            case .synthetic: return "synthetic squat"
+            case .synthetic: return "synthetic"
             case .video(let url): return url.lastPathComponent
             }
         }
     }
 
-    /// Where the video is expected. Drop `squat.mp4` into ~/duo-hack/design/ and rebuild.
-    static let videoName = "squat"
-    static let videoExtension = "mp4"
+    let profiles: [any Profile]
+    private(set) var profile: any Profile
+    private let sink: ProfileSink
 
-    var source: Source
-    var thresholds = SquatThresholds()
-    var smoothingAlpha = 0.5
+    private(set) var source: Source = .synthetic
+    private(set) var readout: Readout = .empty
+    private(set) var framesAnalysed = 0
+    private(set) var log: [LogEntry] = []
+    /// Bumped on every readout refresh so views bound to `controls` closures re-read them.
+    private(set) var revision = 0
 
-    private(set) var timeline = PoseTimeline()
-    private(set) var analysis = SquatAnalysis.empty
     var currentTime: TimeInterval = 0
     var duration: TimeInterval = 10
     var videoSize = CGSize(width: 1080, height: 1920)
+    private(set) var videoOrientation: CGImagePropertyOrientation = .up
     var isPlaying = false
     var isReady = false
-    /// Restart from the top when the clip ends (demo-friendly). TODO: expose in the UI if wanted.
-    var loops = true
     var errorMessage: String?
+    /// Restart from the top when the clip ends.
+    var loops = true
 
     // Hinge
     var hingeDegrees: Double?
@@ -45,58 +48,71 @@ final class SessionModel {
     private var lastScrubDegrees: Double?
     var isScrubbing = false
 
-    private(set) var engine: PoseEngine?
+    private(set) var engine: AssessmentEngine?
     var player: AVPlayer? { engine?.player }
 
-    init(source: Source) {
-        self.source = source
+    init(profiles: [any Profile]) {
+        precondition(!profiles.isEmpty)
+        self.profiles = profiles
+        self.profile = profiles[0]
+        self.sink = ProfileSink(profile: profiles[0])
     }
 
-    /// Video if bundled, synthetic otherwise.
     static func makeDefault() -> SessionModel {
-        if let url = Bundle.main.url(forResource: videoName, withExtension: videoExtension, subdirectory: "design") {
-            return SessionModel(source: .video(url))
-        }
-        return SessionModel(source: .synthetic)
+        SessionModel(profiles: [SquatProfile(), FaceSymmetryProfile()])
     }
 
     // MARK: - Derived
 
-    var current: AnalyzedFrame? { analysis.frame(at: currentTime) }
-    var metrics: SquatMetrics? { current?.metrics }
-    var repCount: Int { analysis.repCount }
-    var phase: RepCounter.Phase { current?.phase ?? .standing }
     var progress: Double { duration > 0 ? min(max(currentTime / duration, 0), 1) : 0 }
+    var sourceLabel: String { "\(profile.displayName) · \(source.label)" }
 
-    /// Simple, patient-facing cue for the current frame.
-    var patientCue: String {
-        guard let m = metrics else { return "Step into frame" }
-        if m.isValgus { return "Push your knees out" }
-        switch phase {
-        case .standing: return repCount == 0 ? "Ready when you are" : "Nice — \(repCount) done"
-        case .descending: return "Sit back and down"
-        case .bottom: return m.depth >= 1 ? "Good depth" : "A little lower"
-        case .ascending: return "Drive up"
+    // MARK: - Profiles
+
+    /// Video if `design/<videoName>.mp4` is bundled, synthetic otherwise.
+    static func source(for profile: any Profile) -> Source {
+        if let url = Bundle.main.url(forResource: profile.videoName, withExtension: "mp4", subdirectory: "design") {
+            return .video(url)
         }
+        return .synthetic
+    }
+
+    /// Swap the running assessment. One assignment plus reset(); the engine is rebuilt because the
+    /// two profiles may consume different videos.
+    func select(_ next: any Profile) {
+        guard next !== profile else { return }
+        engine?.stop()
+        next.reset()
+        profile = next
+        sink.profile = next
+        start()
+    }
+
+    func selectProfile(id: String) {
+        if let p = profiles.first(where: { $0.id == id }) { select(p) }
     }
 
     // MARK: - Engine lifecycle
 
-    /// The swap point: synthetic ↔ video.
-    private func makeEngine() -> PoseEngine {
-        switch source {
-        case .synthetic: return SyntheticPoseEngine()
-        case .video(let url): return VideoPoseEngine(url: url)
-        }
-    }
-
     func start() {
         engine?.stop()
-        timeline.removeAll()
-        analysis = .empty
+        profile.reset()
+        readout = .empty
+        log = []
+        framesAnalysed = 0
         isReady = false
         errorMessage = nil
-        let e = makeEngine()
+        currentTime = 0
+        lastScrubDegrees = nil
+        source = Self.source(for: profile)
+
+        let e: AssessmentEngine
+        switch source {
+        case .synthetic:
+            e = SyntheticEngine(sink: sink, duration: profile.syntheticDuration, videoSize: profile.syntheticVideoSize)
+        case .video(let url):
+            e = VideoEngine(url: url, sink: sink)
+        }
         e.delegate = self
         engine = e
         e.start()
@@ -128,9 +144,18 @@ final class SessionModel {
         engine?.seek(to: t)
     }
 
-    /// Re-run the analysis with new thresholds/smoothing (e.g. after editing them in the UI).
-    func reanalyze() {
-        analysis = SquatAnalyzer.analyze(timeline.frames, thresholds: thresholds, smoothingAlpha: smoothingAlpha)
+    /// Drop the profile's calibration/history and keep going from the playhead.
+    func recalibrate() {
+        profile.recalibrate()
+        refresh()
+    }
+
+    /// Pull the latest readout from the profile (after a frame, a threshold change, a swap).
+    func refresh() {
+        readout = profile.readout()
+        framesAnalysed = profile.framesAnalysed
+        log = profile.log
+        revision &+= 1
     }
 
     // MARK: - Hinge → scrub
@@ -152,28 +177,30 @@ final class SessionModel {
     }
 }
 
-extension SessionModel: PoseEngineDelegate {
-    func engine(_ engine: PoseEngine, isReadyWithDuration duration: TimeInterval, videoSize: CGSize) {
+extension SessionModel: AssessmentEngineDelegate {
+    func engine(_ engine: AssessmentEngine, isReadyWithDuration duration: TimeInterval, videoSize: CGSize,
+                orientation: CGImagePropertyOrientation) {
         self.duration = duration
         self.videoSize = videoSize
+        self.videoOrientation = orientation
+        profile.imageOrientation = orientation
         isReady = true
     }
 
-    func engine(_ engine: PoseEngine, didProduce frame: PoseFrame) {
-        timeline.insert(frame)
-        reanalyze()
+    func engineDidProcessFrame(_ engine: AssessmentEngine) {
+        refresh()
     }
 
-    func engine(_ engine: PoseEngine, timeDidChange time: TimeInterval) {
+    func engine(_ engine: AssessmentEngine, timeDidChange time: TimeInterval) {
         currentTime = time
     }
 
-    func engine(_ engine: PoseEngine, didFail message: String) {
+    func engine(_ engine: AssessmentEngine, didFail message: String) {
         errorMessage = message
         isPlaying = false
     }
 
-    func engineDidReachEnd(_ engine: PoseEngine) {
+    func engineDidReachEnd(_ engine: AssessmentEngine) {
         if loops, !isScrubbing {
             seek(to: 0)
             play()

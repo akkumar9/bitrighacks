@@ -1,26 +1,23 @@
 import Foundation
 import AVFoundation
-import Vision
 import QuartzCore
 import ImageIO
 
-/// AVPlayer → AVPlayerItemVideoOutput → VNDetectHumanBodyPoseRequest → PoseFrame.
+/// AVPlayer → AVPlayerItemVideoOutput → the current profile's `ingest(pixelBuffer:at:)`.
 ///
-/// A CADisplayLink on the main thread pulls the pixel buffer for the current item time, hands it
-/// to a serial background queue for Vision, and posts the resulting frame back on main. At most
-/// one Vision request is in flight; frames that arrive while busy are skipped, never queued.
-/// Scrubbing works the same way: after a seek the output has a new pixel buffer, the link picks
-/// it up, and the timeline gets that frame.
+/// A CADisplayLink on the main thread pulls the pixel buffer for the current item time and hands
+/// it to a serial background queue where the profile runs its Vision request. At most one frame
+/// is in flight; frames that arrive while busy are skipped, never queued. Scrubbing works the same
+/// way: after a seek the output has a new pixel buffer, the link picks it up, the profile gets it.
 ///
-/// NOT YET RUN AGAINST A REAL FILE (squat.mp4 was not available when this was written).
-/// TODO: verify on squat.mp4: (1) skeleton lines up with the AVPlayerLayer picture — if it is
-/// rotated, `applyPreferredTransform` is the switch; (2) Vision keeps up at 30 fps on the sim.
+/// TODO: verify on real footage: (1) the overlay lines up with the AVPlayerLayer picture — if it
+/// is rotated, `applyPreferredTransform` is the switch; (2) Vision keeps up at 30 fps on the sim.
 @MainActor
-final class VideoPoseEngine: NSObject, PoseEngine {
-    weak var delegate: PoseEngineDelegate?
+final class VideoEngine: NSObject, AssessmentEngine {
+    weak var delegate: AssessmentEngineDelegate?
     var player: AVPlayer? { avPlayer }
 
-    private let url: URL
+    private let sink: ProfileSink
     private let avPlayer: AVPlayer
     private let item: AVPlayerItem
     private let output: AVPlayerItemVideoOutput
@@ -28,19 +25,18 @@ final class VideoPoseEngine: NSObject, PoseEngine {
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
-    private var orientation: CGImagePropertyOrientation = .up
     private var inFlight = false
     private var reportedReady = false
 
     /// Rotate frames by the track's preferredTransform before Vision runs. Portrait iPhone
     /// recordings are stored landscape + transform; the player applies the transform when
-    /// drawing, so Vision must too or the skeleton lands sideways.
+    /// drawing, so Vision must too or the overlay lands sideways.
     static let applyPreferredTransform = true
 
     private let visionQueue = DispatchQueue(label: "duoassess.vision", qos: .userInitiated)
 
-    init(url: URL) {
-        self.url = url
+    init(url: URL, sink: ProfileSink) {
+        self.sink = sink
         item = AVPlayerItem(url: url)
         output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
@@ -73,8 +69,7 @@ final class VideoPoseEngine: NSObject, PoseEngine {
     func pause() { avPlayer.pause() }
 
     func seek(to time: TimeInterval) {
-        let t = CMTime(seconds: time, preferredTimescale: 600)
-        avPlayer.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
+        avPlayer.seek(to: CMTime(seconds: time, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
     func stop() {
@@ -106,19 +101,17 @@ final class VideoPoseEngine: NSObject, PoseEngine {
     private func prepareAndReport() async {
         var size = item.presentationSize
         var duration = item.duration.seconds
-        if let track = try? await item.asset.loadTracks(withMediaType: .video).first {
-            if let (natural, transform) = try? await track.load(.naturalSize, .preferredTransform) {
-                if Self.applyPreferredTransform {
-                    orientation = Self.orientation(for: transform)
-                }
-                let rect = CGRect(origin: .zero, size: natural).applying(transform)
-                if rect.width > 0, rect.height > 0 { size = CGSize(width: abs(rect.width), height: abs(rect.height)) }
-            }
+        var orientation = CGImagePropertyOrientation.up
+        if let track = try? await item.asset.loadTracks(withMediaType: .video).first,
+           let (natural, transform) = try? await track.load(.naturalSize, .preferredTransform) {
+            if Self.applyPreferredTransform { orientation = Self.orientation(for: transform) }
+            let rect = CGRect(origin: .zero, size: natural).applying(transform)
+            if rect.width > 0, rect.height > 0 { size = CGSize(width: abs(rect.width), height: abs(rect.height)) }
         }
         if !duration.isFinite || duration <= 0, let d = try? await item.asset.load(.duration) {
             duration = d.seconds
         }
-        delegate?.engine(self, isReadyWithDuration: duration, videoSize: size)
+        delegate?.engine(self, isReadyWithDuration: duration, videoSize: size, orientation: orientation)
 
         let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
@@ -130,7 +123,7 @@ final class VideoPoseEngine: NSObject, PoseEngine {
     /// Maps a track transform onto the orientation Vision needs to see the frame upright.
     static func orientation(for t: CGAffineTransform) -> CGImagePropertyOrientation {
         switch (t.a, t.b, t.c, t.d) {
-        case (0, 1, -1, 0):  return .right      // portrait, home button at bottom (typical iPhone)
+        case (0, 1, -1, 0):  return .right      // portrait, typical iPhone recording
         case (0, -1, 1, 0):  return .left       // portrait upside down
         case (-1, 0, 0, -1): return .down       // landscape, rotated 180
         default:             return .up
@@ -147,43 +140,13 @@ final class VideoPoseEngine: NSObject, PoseEngine {
         guard let pixelBuffer = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: &displayTime) else { return }
         inFlight = true
         let seconds = displayTime.seconds
-        let orientation = self.orientation
-        visionQueue.async { [weak self] in
-            let frame = Self.detectPose(in: pixelBuffer, at: seconds, orientation: orientation)
-            Task { @MainActor in
+        visionQueue.async { [sink] in
+            sink.ingest(pixelBuffer: pixelBuffer, at: seconds)
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.inFlight = false
-                if let frame { self.delegate?.engine(self, didProduce: frame) }
+                self.delegate?.engineDidProcessFrame(self)
             }
         }
     }
-
-    /// Runs on the Vision queue. Returns nil when no body is found.
-    nonisolated static func detectPose(in pixelBuffer: CVPixelBuffer, at time: TimeInterval,
-                                       orientation: CGImagePropertyOrientation) -> PoseFrame? {
-        let request = VNDetectHumanBodyPoseRequest()
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
-        do { try handler.perform([request]) } catch { return nil }
-        guard let observation = request.results?.first else { return nil }
-        guard let points = try? observation.recognizedPoints(.all) else { return nil }
-
-        var joints: [Joint: JointPoint] = [:]
-        for (visionName, joint) in jointMap {
-            guard let p = points[visionName] else { continue }
-            // Vision: normalized, origin bottom-left, y up — exactly our JointPoint convention.
-            joints[joint] = JointPoint(x: Double(p.location.x), y: Double(p.location.y), confidence: Double(p.confidence))
-        }
-        guard !joints.isEmpty else { return nil }
-        return PoseFrame(time: time, joints: joints)
-    }
-
-    nonisolated static let jointMap: [VNHumanBodyPoseObservation.JointName: Joint] = [
-        .nose: .nose, .neck: .neck, .root: .root,
-        .leftShoulder: .leftShoulder, .rightShoulder: .rightShoulder,
-        .leftElbow: .leftElbow, .rightElbow: .rightElbow,
-        .leftWrist: .leftWrist, .rightWrist: .rightWrist,
-        .leftHip: .leftHip, .rightHip: .rightHip,
-        .leftKnee: .leftKnee, .rightKnee: .rightKnee,
-        .leftAnkle: .leftAnkle, .rightAnkle: .rightAnkle,
-    ]
 }
